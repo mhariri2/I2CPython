@@ -100,6 +100,21 @@ def limit_step(previous: float, target: float, max_step: float) -> float:
     return target
 
 
+def triangle_wave_angle(
+    elapsed_s: float,
+    period_s: float,
+    min_angle: float,
+    max_angle: float,
+    phase_offset: float = 0.0,
+) -> float:
+    if period_s <= 0.0:
+        return min_angle
+    span = max_angle - min_angle
+    phase = ((elapsed_s + phase_offset) / period_s) % 1.0
+    triangle = 1.0 - abs(2.0 * phase - 1.0)
+    return min_angle + span * triangle
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Drive PCA9685 servos from MPU6050 X/Y angles and print xyz plus VL53L0X distance.")
     parser.add_argument("--device-index", type=int, default=0, help="CH341 device index (default 0).")
@@ -112,10 +127,18 @@ def main() -> int:
     parser.add_argument("--timeout", type=float, default=1.5, help="VL53L0X read timeout in seconds.")
     parser.add_argument("--servo-channel", type=int, default=4, help="PCA9685 servo channel driven from MPU X angle (default 4).")
     parser.add_argument("--servo-y-channel", type=int, default=5, help="PCA9685 servo channel driven from MPU Y angle (default 5).")
+    parser.add_argument("--neck-channel", type=int, default=8, help="PCA9685 servo channel for Neck test motion (default 8).")
+    parser.add_argument("--waist-channel", type=int, default=9, help="PCA9685 servo channel for Waist test motion (default 9).")
+    parser.add_argument("--hip-channel", type=int, default=10, help="PCA9685 servo channel for Hip test motion (default 10).")
+    parser.add_argument("--left-hand-channel", type=int, default=11, help="PCA9685 servo channel for Left Hand test motion (default 11).")
+    parser.add_argument("--right-hand-channel", type=int, default=12, help="PCA9685 servo channel for Right Hand test motion (default 12).")
     parser.add_argument("--min-us", type=float, default=500.0, help="Servo minimum pulse width in microseconds (RDS3115MG default 500).")
     parser.add_argument("--max-us", type=float, default=2500.0, help="Servo maximum pulse width in microseconds (RDS3115MG default 2500).")
     parser.add_argument("--min-angle", type=float, default=0.0, help="Servo angle used at the minimum mapped distance.")
     parser.add_argument("--max-angle", type=float, default=180.0, help="Servo angle used at the maximum mapped distance.")
+    parser.add_argument("--test-min-angle", type=float, default=30.0, help="Minimum angle for the Neck/Waist/Hip test sweep.")
+    parser.add_argument("--test-max-angle", type=float, default=150.0, help="Maximum angle for the Neck/Waist/Hip test sweep.")
+    parser.add_argument("--test-period", type=float, default=3.0, help="Seconds for one full Neck/Waist/Hip test sweep cycle.")
     parser.add_argument("--zero-offset-mm", type=float, default=20.0, help="Subtract this offset from each distance and clamp at 0 mm.")
     parser.add_argument("--mpu-x-min-angle", type=float, default=-90.0, help="MPU X-axis angle mapped to the minimum servo angle.")
     parser.add_argument("--mpu-x-max-angle", type=float, default=90.0, help="MPU X-axis angle mapped to the maximum servo angle.")
@@ -129,12 +152,16 @@ def main() -> int:
 
     if args.max_angle < args.min_angle:
         raise ValueError("max-angle must be greater than or equal to min-angle")
+    if args.test_max_angle < args.test_min_angle:
+        raise ValueError("test-max-angle must be greater than or equal to test-min-angle")
     if args.mpu_x_max_angle <= args.mpu_x_min_angle:
         raise ValueError("mpu-x-max-angle must be greater than mpu-x-min-angle")
     if args.mpu_y_max_angle <= args.mpu_y_min_angle:
         raise ValueError("mpu-y-max-angle must be greater than mpu-y-min-angle")
     if not 0.0 < args.mpu_smoothing_alpha <= 1.0:
         raise ValueError("mpu-smoothing-alpha must be between 0 and 1")
+    if args.test_period <= 0.0:
+        raise ValueError("test-period must be greater than 0")
 
     def read_distance(sensor: Sensor, mode: str) -> int:
         return sensor.single_read(args.timeout) if mode == "single" else sensor.continuous_read(args.timeout)
@@ -201,6 +228,41 @@ def main() -> int:
             min_us=args.min_us,
             max_us=args.max_us,
         )
+        neck_servo = Servo(
+            pca,
+            channel=args.neck_channel,
+            freq_hz=args.freq,
+            min_us=args.min_us,
+            max_us=args.max_us,
+        )
+        waist_servo = Servo(
+            pca,
+            channel=args.waist_channel,
+            freq_hz=args.freq,
+            min_us=args.min_us,
+            max_us=args.max_us,
+        )
+        hip_servo = Servo(
+            pca,
+            channel=args.hip_channel,
+            freq_hz=args.freq,
+            min_us=args.min_us,
+            max_us=args.max_us,
+        )
+        left_hand_servo = Servo(
+            pca,
+            channel=args.left_hand_channel,
+            freq_hz=args.freq,
+            min_us=args.min_us,
+            max_us=args.max_us,
+        )
+        right_hand_servo = Servo(
+            pca,
+            channel=args.right_hand_channel,
+            freq_hz=args.freq,
+            min_us=args.min_us,
+            max_us=args.max_us,
+        )
 
         sensor = Sensor(bus, address=args.vl53l0x_address)
         mpu = MPU6050(bus, address=args.mpu_address)
@@ -210,7 +272,9 @@ def main() -> int:
         vl53_model = sensor.model_id()
         print(
             f"VL53L0X model=0x{vl53_model:02X} | MPU6050 WHO_AM_I=0x{mpu_who_am_i:02X} | "
-            f"servo X channel={args.servo_channel} | servo Y channel={args.servo_y_channel}"
+            f"servo X channel={args.servo_channel} | servo Y channel={args.servo_y_channel} | "
+            f"Neck={args.neck_channel} Waist={args.waist_channel} Hip={args.hip_channel} | "
+            f"Left Hand={args.left_hand_channel} Right Hand={args.right_hand_channel}"
         )
         x_zero, y_zero = calibrate_mpu(mpu)
         print(f"MPU zero | x={x_zero:6.1f} deg | y={y_zero:6.1f} deg")
@@ -222,6 +286,7 @@ def main() -> int:
         )
 
         last_update = time.monotonic()
+        motion_start = last_update
         filtered_x_angle = 0.0
         filtered_y_angle = 0.0
         servo_angle = (args.min_angle + args.max_angle) / 2.0
@@ -253,13 +318,56 @@ def main() -> int:
                     args.min_angle,
                     args.max_angle,
                 )
+                elapsed_s = now - motion_start
+                neck_angle = triangle_wave_angle(
+                    elapsed_s,
+                    args.test_period,
+                    args.test_min_angle,
+                    args.test_max_angle,
+                    phase_offset=0.0,
+                )
+                waist_angle = triangle_wave_angle(
+                    elapsed_s,
+                    args.test_period,
+                    args.test_min_angle,
+                    args.test_max_angle,
+                    phase_offset=args.test_period / 3.0,
+                )
+                hip_angle = triangle_wave_angle(
+                    elapsed_s,
+                    args.test_period,
+                    args.test_min_angle,
+                    args.test_max_angle,
+                    phase_offset=(2.0 * args.test_period) / 3.0,
+                )
+                left_hand_angle = triangle_wave_angle(
+                    elapsed_s,
+                    args.test_period,
+                    args.test_min_angle,
+                    args.test_max_angle,
+                    phase_offset=args.test_period / 6.0,
+                )
+                right_hand_angle = triangle_wave_angle(
+                    elapsed_s,
+                    args.test_period,
+                    args.test_min_angle,
+                    args.test_max_angle,
+                    phase_offset=args.test_period / 2.0,
+                )
                 servo_angle = limit_step(servo_angle, target_servo_angle, args.servo_max_step_deg)
                 servo_y_angle = limit_step(servo_y_angle, target_servo_y_angle, args.servo_max_step_deg)
                 servo.set_angle(servo_angle)
                 servo_y.set_angle(servo_y_angle)
+                neck_servo.set_angle(neck_angle)
+                waist_servo.set_angle(waist_angle)
+                hip_servo.set_angle(hip_angle)
+                left_hand_servo.set_angle(left_hand_angle)
+                right_hand_servo.set_angle(right_hand_angle)
                 print(
                     f"xyz=({filtered_x_angle:6.1f}, {filtered_y_angle:6.1f}, {z_angle:6.1f}) deg | "
-                    f"distance={adjusted_distance_mm:6.1f} mm | servo x={servo_angle:6.1f} deg | servo y={servo_y_angle:6.1f} deg",
+                    f"distance={adjusted_distance_mm:6.1f} mm | servo x={servo_angle:6.1f} deg | servo y={servo_y_angle:6.1f} deg | "
+                    f"Neck={neck_angle:6.1f} deg | Waist={waist_angle:6.1f} deg | Hip={hip_angle:6.1f} deg | "
+                    f"Left Hand={left_hand_angle:6.1f} deg | Right Hand={right_hand_angle:6.1f} deg",
                     end="\r",
                     flush=True,
                 )

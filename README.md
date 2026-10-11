@@ -30,6 +30,16 @@ After each write attempt, the script waits three seconds. Press `s` during that 
 python .\probe_ch341_display.py
 ```
 
+## Streamlit Dashboard
+
+The workspace also includes a live control dashboard for the current CH341, PCA9685, VL53L0X, and MPU6050 setup.
+
+```powershell
+streamlit run .\streamlit_servo_dashboard.py
+```
+
+The dashboard shows a fixed telemetry layout for distance and MPU angles, drives channels 4 and 5 from the MPU logic, runs channels 8-12 in an auto test sweep by default, lets you pause channels 8-12 for manual angle entry, and includes a button that sends all configured servos to 0 degrees.
+
 ## Important limitation
 
 Many 240x240 RGB modules label SPI lines as `SCL` and `SDA`. If your panel is one of those, SDA/SCL alone is not enough to drive the display because a TFT controller such as ST7789 usually also needs `CS`, `DC`, and often `RST`.
