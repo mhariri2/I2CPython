@@ -6,7 +6,7 @@ from __future__ import annotations
 import argparse
 import time
 
-from pca9685_servo_sweep import CH341I2C
+from older.pca9685_servo_sweep import CH341I2C
 
 
 DEFAULT_ADDRESS = 0x29
@@ -223,32 +223,61 @@ def main() -> int:
         if model not in (0xEE, 0xCC):
             print("Warning: unexpected model ID; continuing because the device answered I2C.")
 
-        for mode in ("single", "continuous"):
-            print(f"TEST {mode}: calibrated VL53L0X reference configuration")
-            try:
-                sensor.standard_init()
-                sensor.configure_default_ranging()
-                readings = []
-                for _ in range(args.repeat):
-                    value = sensor.single_read(args.timeout) if mode == "single" else sensor.continuous_read(args.timeout)
-                    readings.append(value)
-                print(f"SUCCESS: {readings[-1]} mm | readings={readings}")
-                print("Continuing with the successful configuration. Press Ctrl+C to stop.")
-                while True:
-                    value = sensor.single_read(args.timeout) if mode == "single" else sensor.continuous_read(args.timeout)
-                    print(f"Distance: {value:4d} mm ({value / 10.0:6.1f} cm)", end="\r", flush=True)
-                    time.sleep(0.1)
-            except (OSError, TimeoutError, ValueError) as exc:
-                print(f"  failed: {exc}")
+        def read_once(selected_mode: str) -> int:
+            return sensor.single_read(args.timeout) if selected_mode == "single" else sensor.continuous_read(args.timeout)
+
+        def initialize_mode() -> str:
+            last_error: Exception | None = None
+            for candidate_mode in ("continuous", "single"):
+                print(f"TEST {candidate_mode}: calibrated VL53L0X reference configuration")
                 try:
-                    sensor.stop()
-                except OSError:
-                    pass
-        print("No tested software configuration produced a valid measurement.")
-        return 1
+                    sensor.standard_init()
+                    sensor.configure_default_ranging()
+                    readings = []
+                    for _ in range(args.repeat):
+                        readings.append(read_once(candidate_mode))
+                    print(f"SUCCESS: {readings[-1]} mm | readings={readings}")
+                    return candidate_mode
+                except (OSError, TimeoutError, ValueError) as exc:
+                    last_error = exc
+                    print(f"  failed: {exc}")
+                    try:
+                        sensor.stop()
+                    except OSError:
+                        pass
+            if last_error is not None:
+                raise last_error
+            raise RuntimeError("no VL53L0X modes were tested")
+
+        mode = initialize_mode()
+        print("Continuing with the successful configuration. Press Ctrl+C to stop.")
+        while True:
+            try:
+                while True:
+                    try:
+                        value = read_once(mode)
+                        print(f"Distance: {value:4d} mm ({value / 10.0:6.1f} cm)", end="\r", flush=True)
+                        time.sleep(0.1)
+                    except (OSError, TimeoutError, ValueError) as exc:
+                        print(f"\nWarning: {exc}; reinitializing {mode} mode...", flush=True)
+                        while True:
+                            try:
+                                sensor.standard_init()
+                                sensor.configure_default_ranging()
+                                break
+                            except (OSError, TimeoutError, ValueError) as reinit_exc:
+                                print(f"Reinitialization failed: {reinit_exc}; retrying...", flush=True)
+                                time.sleep(0.5)
+            except (OSError, TimeoutError, ValueError) as exc:
+                print(f"\nUnexpected runtime error: {exc}; restarting mode selection...", flush=True)
+                time.sleep(0.5)
+                mode = initialize_mode()
     except KeyboardInterrupt:
         print("\nStopped.")
         return 0
+    except (OSError, TimeoutError, ValueError) as exc:
+        print(f"No tested software configuration produced a valid measurement: {exc}")
+        return 1
     finally:
         bus.close()
 

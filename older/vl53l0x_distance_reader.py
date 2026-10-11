@@ -7,8 +7,8 @@ import argparse
 import statistics
 import time
 
-from pca9685_servo_sweep import CH341I2C
-from vl53l0x_configuration_tester import Sensor
+from older.pca9685_servo_sweep import CH341I2C, PCA9685, Servo
+from older.vl53l0x_configuration_tester import Sensor
 
 
 VL53L0X_DEFAULT_ADDRESS = 0x29
@@ -68,12 +68,22 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Continuously read CJVL53L0XV2 distance via CH341T I2C.")
     parser.add_argument("--device-index", type=int, default=0, help="CH341 device index (default 0).")
     parser.add_argument("--address", type=lambda value: int(value, 0), default=VL53L0X_DEFAULT_ADDRESS, help="VL53L0X I2C address (default 0x29).")
+    parser.add_argument("--pca-address", type=lambda value: int(value, 0), default=0x40, help="PCA9685 I2C address (default 0x40).")
     parser.add_argument("--dll", default=None, help="Path to CH341DLLA64.DLL or CH341DLL.DLL.")
     parser.add_argument("--interval", type=float, default=0.1, help="Seconds between readings (default 0.1).")
     parser.add_argument("--timeout", type=float, default=1.5, help="Seconds to wait for a reading before retrying initialization.")
-    parser.add_argument("--zero-offset-mm", type=float, default=23.0, help="Subtract this offset from each reading and clamp at 0 mm.")
+    parser.add_argument("--zero-offset-mm", type=float, default=20.0, help="Subtract this offset from each reading and clamp at 0 mm.")
     parser.add_argument("--calibrate-zero", action="store_true", help="Measure a recommended zero offset from the current target position and exit.")
     parser.add_argument("--calibration-samples", type=int, default=15, help="Number of valid samples to average during zero calibration.")
+    parser.add_argument("--servo-channel", type=int, default=1, help="PCA9685 servo channel to drive from distance (default 1).")
+    parser.add_argument("--servo-freq", type=float, default=50.0, help="Servo PWM frequency in Hz (RDS3115MG default 50).")
+    parser.add_argument("--servo-min-us", type=float, default=500.0, help="Servo minimum pulse width in microseconds (RDS3115MG default 500).")
+    parser.add_argument("--servo-max-us", type=float, default=2500.0, help="Servo maximum pulse width in microseconds (RDS3115MG default 2500).")
+    parser.add_argument("--servo-min-angle", type=float, default=0.0, help="Servo angle used at the minimum mapped distance (RDS3115MG default 0).")
+    parser.add_argument("--servo-max-angle", type=float, default=180.0, help="Servo angle used at the maximum mapped distance (RDS3115MG default 180).")
+    parser.add_argument("--servo-min-distance-mm", type=float, default=0.0, help="Adjusted distance mapped to the minimum servo angle.")
+    parser.add_argument("--servo-max-distance-mm", type=float, default=40.0, help="Adjusted distance mapped to the maximum servo angle.")
+    parser.add_argument("--servo-test-hold-seconds", type=float, default=1.0, help="Seconds to hold each startup servo self-test position.")
     args = parser.parse_args()
 
     def read_once(sensor: Sensor, mode: str) -> int:
@@ -82,25 +92,71 @@ def main() -> int:
     def apply_zero_offset(distance_mm: int) -> float:
         return max(0.0, distance_mm - args.zero_offset_mm)
 
+    def distance_to_servo_angle(distance_mm: float) -> float:
+        if args.servo_max_distance_mm <= args.servo_min_distance_mm:
+            raise ValueError("servo-max-distance-mm must be greater than servo-min-distance-mm")
+        clamped_distance = min(max(distance_mm, args.servo_min_distance_mm), args.servo_max_distance_mm)
+        ratio = (clamped_distance - args.servo_min_distance_mm) / (
+            args.servo_max_distance_mm - args.servo_min_distance_mm
+        )
+        return args.servo_min_angle + (args.servo_max_angle - args.servo_min_angle) * ratio
+
+    def pulse_for_angle(angle: float) -> float:
+        bounded_angle = max(0.0, min(180.0, angle))
+        return args.servo_min_us + (args.servo_max_us - args.servo_min_us) * (bounded_angle / 180.0)
+
+    def move_servo_for_test(servo: Servo, angle: float, label: str) -> None:
+        servo.set_angle(angle)
+        print(
+            f"Servo self-test {label}: angle={angle:.1f} deg | channel={args.servo_channel} | pulse={pulse_for_angle(angle):.0f} us",
+            flush=True,
+        )
+        time.sleep(args.servo_test_hold_seconds)
+
     def initialize_sensor(sensor: Sensor) -> tuple[str, int]:
-        last_error: Exception | None = None
-        for mode in ("single", "continuous"):
-            for _ in range(2):
+        while True:
+            for mode in ("continuous", "single"):
                 try:
                     sensor.standard_init()
                     sensor.configure_default_ranging()
                     return mode, read_once(sensor, mode)
                 except (OSError, TimeoutError, ValueError) as exc:
-                    last_error = exc
-                    time.sleep(0.1)
-        assert last_error is not None
-        raise last_error
+                    print(f"Initialization failed in {mode} mode: {exc}; retrying...", flush=True)
+                    time.sleep(0.5)
 
     bus = CH341I2C(device_index=args.device_index, dll_path=args.dll)
     try:
+        pca = PCA9685(bus, address=args.pca_address)
+        detected, mode1, mode2 = pca.verify()
+        if not detected:
+            raise RuntimeError(
+                f"PCA9685 did not respond at I2C address 0x{args.pca_address:02X} "
+                f"(MODE1=0x{mode1:02X}, MODE2=0x{mode2:02X})"
+            )
+        pca.reset()
+        pca.set_pwm_freq(args.servo_freq)
+        servo = Servo(
+            pca,
+            channel=args.servo_channel,
+            freq_hz=args.servo_freq,
+            min_us=args.servo_min_us,
+            max_us=args.servo_max_us,
+        )
+        move_servo_for_test(servo, args.servo_min_angle, "min")
+        move_servo_for_test(servo, args.servo_max_angle, "max")
+        move_servo_for_test(servo, (args.servo_min_angle + args.servo_max_angle) / 2.0, "center")
+
         sensor = Sensor(bus, address=args.address)
         model_id = sensor.model_id()
         print(f"VL53L0X found | CH341 index {args.device_index:08d} | I2C address 0x{args.address:02X} | model ID 0x{model_id:02X}")
+        print(
+            f"PCA9685 found | I2C address 0x{args.pca_address:02X} | "
+            f"servo channel {args.servo_channel} maps {args.servo_min_distance_mm:.1f}-{args.servo_max_distance_mm:.1f} mm "
+            f"to {args.servo_min_angle:.1f}-{args.servo_max_angle:.1f} deg"
+        )
+        print(
+            f"Servo profile | RDS3115MG-style PWM {args.servo_min_us:.0f}-{args.servo_max_us:.0f} us at {args.servo_freq:.1f} Hz"
+        )
         mode, distance_mm = initialize_sensor(sensor)
 
         if args.calibrate_zero:
@@ -129,8 +185,10 @@ def main() -> int:
         while True:
             try:
                 adjusted_mm = apply_zero_offset(distance_mm)
+                servo_angle = distance_to_servo_angle(adjusted_mm)
+                servo.set_angle(servo_angle)
                 print(
-                    f"Distance: raw={distance_mm:4d} mm adjusted={adjusted_mm:6.1f} mm ({adjusted_mm / 10.0:6.1f} cm)",
+                    f"Distance: raw={distance_mm:4d} mm adjusted={adjusted_mm:6.1f} mm ({adjusted_mm / 10.0:6.1f} cm) | servo={servo_angle:5.1f} deg",
                     end="\r",
                     flush=True,
                 )

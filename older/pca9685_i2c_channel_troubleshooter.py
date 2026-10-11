@@ -17,7 +17,7 @@ import sys
 import time
 from dataclasses import dataclass
 
-from pca9685_servo_sweep import CH341I2C, PCA9685, Servo
+from older.pca9685_servo_sweep import CH341I2C, PCA9685, Servo
 
 USB_ID = r"USB\VID_1A86&PID_5512"
 USB_ID_REVISION = r"USB\VID_1A86&PID_5512&REV_0304"
