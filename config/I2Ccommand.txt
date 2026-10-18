@@ -1,0 +1,13 @@
+## Ubuntu CH341T fix from calude
+
+   git clone https://github.com/frank-zago/ch341-i2c-spi-gpio.git
+   cd ch341-i2c-spi-gpio
+   make && sudo make install
+   sudo modprobe ch341-core i2c-ch341
+
+
+   lsmod | grep ch341
+lsusb | grep -i 1a86
+sudo dmesg | tail -20
+sudo modprobe i2c-dev
+i2cdetect -l
