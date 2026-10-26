@@ -12,7 +12,13 @@ import struct
 import sys
 import time
 
-from smbus2 import SMBus, i2c_msg
+try:
+    from smbus2 import SMBus, i2c_msg
+    SIMULATED = False
+except ImportError:  # no fcntl on Windows
+    from fake_smbus import SMBus, i2c_msg
+    SIMULATED = True
+    print("smbus2 unavailable: using simulated sensor data")
 
 MPU_ADDR = 0x68          # 0x69 if AD0 is high
 AK_ADDR = 0x0C           # AK8963 magnetometer (via bypass)
@@ -23,6 +29,8 @@ MAG_UT_PER_LSB = 0.15         # 16-bit mode
 
 
 def find_ch341_bus():
+    if SIMULATED:
+        return 0
     for path in glob.glob("/sys/class/i2c-dev/i2c-*/name"):
         with open(path) as f:
             if "CH341" in f.read():
